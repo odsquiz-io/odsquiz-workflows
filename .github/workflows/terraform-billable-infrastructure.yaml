@@ -92,57 +92,96 @@ jobs:
           terraform init -input=false
           terraform validate
 
-      - name: Apply selected billable resources
+      - name: Read infrastructure settings
+        id: settings
+        run: |
+          set -euo pipefail
+          {
+            echo "instance=$(terraform output -raw database_instance_name)"
+            echo "database=$(terraform output -raw database_name)"
+            echo "exports_bucket=$(terraform output -raw db_exports_bucket_name)"
+            echo "db_user_secret=$(terraform output -raw database_user_secret)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create database
+        if: inputs.action == 'start'
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -out=tfplan \
+            -target=google_sql_database_instance.main \
+            -target=google_sql_database.app \
+            -target=google_sql_user.app \
+            -target=google_storage_bucket_iam_member.sql_db_exports_object_admin
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Import latest database export
+        if: inputs.action == 'start'
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          INSTANCE: ${{ steps.settings.outputs.instance }}
+          DATABASE: ${{ steps.settings.outputs.database }}
+          EXPORTS_BUCKET: ${{ steps.settings.outputs.exports_bucket }}
+          DB_USER_SECRET: ${{ steps.settings.outputs.db_user_secret }}
+        run: |
+          set -euo pipefail
+          export_uri="gs://${EXPORTS_BUCKET}/${DATABASE}.sql.gz"
+          if ! gcloud storage objects describe "$export_uri" --project="$PROJECT_ID" >/dev/null 2>&1; then
+            echo "No database export found; starting with an empty database."
+            exit 0
+          fi
+          db_user="$(gcloud secrets versions access latest --project="$PROJECT_ID" --secret="$DB_USER_SECRET")"
+          echo "::add-mask::$db_user"
+          # The bucket grant for the new instance can take a moment to propagate.
+          for attempt in 1 2 3 4; do
+            if gcloud sql import sql "$INSTANCE" "$export_uri" \
+              --project="$PROJECT_ID" --database="$DATABASE" --user="$db_user" --quiet; then
+              exit 0
+            fi
+            echo "Import attempt $attempt failed; retrying." >&2
+            sleep 30
+          done
+          exit 1
+
+      - name: Create services
         if: inputs.action == 'start'
         run: |
           set -euo pipefail
           terraform plan -input=false -out=tfplan \
             -target=google_cloud_run_v2_service.auth \
             -target=google_cloud_run_v2_service.initiatives \
-            -target=google_cloud_run_v2_service.frontend \
-            -target=google_sql_user.app \
-            -target=google_sql_database.app \
-            -target=google_sql_database_instance.main \
-            -target=google_compute_global_address.odsquiz_lb \
-            -target=google_compute_region_network_endpoint_group.frontend \
-            -target=google_compute_region_network_endpoint_group.auth \
-            -target=google_compute_region_network_endpoint_group.initiatives \
-            -target=google_compute_backend_service.frontend \
-            -target=google_compute_backend_service.auth \
-            -target=google_compute_backend_service.initiatives \
-            -target=google_compute_url_map.odsquiz \
-            -target=google_compute_url_map.odsquiz_https_redirect \
-            -target=google_compute_managed_ssl_certificate.odsquiz \
-            -target=google_compute_target_http_proxy.odsquiz \
-            -target=google_compute_target_https_proxy.odsquiz \
-            -target=google_compute_global_forwarding_rule.odsquiz_http \
-            -target=google_compute_global_forwarding_rule.odsquiz_https \
-            -target=cloudflare_dns_record.custom_domain
+            -target=google_cloud_run_v2_service.quiz \
+            -target=google_cloud_run_v2_service.admin \
+            -target=google_cloud_run_v2_service.frontend
           terraform apply -input=false -auto-approve tfplan
 
-      - name: Destroy selected billable resources
+      - name: Export database
+        if: inputs.action == 'stop'
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          INSTANCE: ${{ steps.settings.outputs.instance }}
+          DATABASE: ${{ steps.settings.outputs.database }}
+          EXPORTS_BUCKET: ${{ steps.settings.outputs.exports_bucket }}
+        run: |
+          set -euo pipefail
+          if ! gcloud sql instances describe "$INSTANCE" --project="$PROJECT_ID" >/dev/null 2>&1; then
+            echo "Cloud SQL instance not found; nothing to export."
+            exit 0
+          fi
+          gcloud sql export sql "$INSTANCE" "gs://${EXPORTS_BUCKET}/${DATABASE}.sql.gz" \
+            --project="$PROJECT_ID" --database="$DATABASE" --quiet
+
+      - name: Destroy billable resources
         if: inputs.action == 'stop'
         run: |
           set -euo pipefail
           terraform plan -destroy -input=false -out=tfplan \
             -target=google_cloud_run_v2_service.auth \
             -target=google_cloud_run_v2_service.initiatives \
+            -target=google_cloud_run_v2_service.quiz \
+            -target=google_cloud_run_v2_service.admin \
             -target=google_cloud_run_v2_service.frontend \
+            -target=google_storage_bucket_iam_member.sql_db_exports_object_admin \
             -target=google_sql_user.app \
             -target=google_sql_database.app \
-            -target=google_sql_database_instance.main \
-            -target=google_compute_global_address.odsquiz_lb \
-            -target=google_compute_region_network_endpoint_group.frontend \
-            -target=google_compute_region_network_endpoint_group.auth \
-            -target=google_compute_region_network_endpoint_group.initiatives \
-            -target=google_compute_backend_service.frontend \
-            -target=google_compute_backend_service.auth \
-            -target=google_compute_backend_service.initiatives \
-            -target=google_compute_url_map.odsquiz \
-            -target=google_compute_url_map.odsquiz_https_redirect \
-            -target=google_compute_managed_ssl_certificate.odsquiz \
-            -target=google_compute_target_http_proxy.odsquiz \
-            -target=google_compute_target_https_proxy.odsquiz \
-            -target=google_compute_global_forwarding_rule.odsquiz_http \
-            -target=google_compute_global_forwarding_rule.odsquiz_https
+            -target=google_sql_database_instance.main
           terraform apply -input=false -auto-approve tfplan
