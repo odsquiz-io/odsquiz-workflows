@@ -150,8 +150,7 @@ jobs:
             -target=google_cloud_run_v2_service.auth \
             -target=google_cloud_run_v2_service.initiatives \
             -target=google_cloud_run_v2_service.quiz \
-            -target=google_cloud_run_v2_service.admin \
-            -target=google_cloud_run_v2_service.frontend
+            -target=google_cloud_run_v2_service.admin
           terraform apply -input=false -auto-approve tfplan
 
       - name: Export database
@@ -179,7 +178,6 @@ jobs:
             -target=google_cloud_run_v2_service.initiatives \
             -target=google_cloud_run_v2_service.quiz \
             -target=google_cloud_run_v2_service.admin \
-            -target=google_cloud_run_v2_service.frontend \
             -target=google_storage_bucket_iam_member.sql_db_exports_object_admin \
             -target=google_sql_user.app \
             -target=google_sql_database.app \
